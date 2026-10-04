@@ -1,0 +1,12 @@
+[project]
+name = "agentsir"
+version = "0.1.0"
+description = "A Telegram agent built with LangChain"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain>=1.0",
+    "langchain-openai>=1.0",
+    "python-dotenv>=1.0",
+    "python-telegram-bot>=22.8",
+]
