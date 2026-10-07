@@ -6,6 +6,7 @@ A [LangChain](https://docs.langchain.com/oss/python/langchain/quickstart) agent 
 
 ```bash
 uv sync
+uv run playwright install chromium
 cp .env.example .env
 ```
 
@@ -55,3 +56,31 @@ def remember(text: str) -> str:
 ```
 
 Restart the bot. No other wiring is required. `tools/time.py` is the working example.
+
+## Web browsing
+
+`tools/web/` gives the agent two tools:
+
+- `web_search(query)` returns titles, URLs, and snippets.
+- `open_page(url, part=1)` returns a page's readable text and the links on it. Long pages come in parts. PDFs work too.
+
+The agent decides which results to open and whether to follow links further, so a question can turn into several searches and page reads.
+
+Search tries Google, then Bing, then [Tavily](https://tavily.com). Google and Bing are scraped in headless Chromium through [Playwright](https://playwright.dev/python/), which they sometimes block with a CAPTCHA. Tavily is an API, so it keeps working when they don't. Pages are read in the browser first and through Tavily when the browser fails, hits a bot check, or finds no text.
+
+When a source blocks us, it is skipped for a while instead of being retried on every call: 30 minutes after a CAPTCHA, an hour after Tavily rejects the key or runs out of credits. Network errors, Tavily rate limits, and Tavily server errors get one retry. If everything fails, the tool tells the agent why, and the agent says so in its answer.
+
+Tavily is optional. Without `TAVILY_API_KEY`, only the browser is used. A free key gives 1,000 credits a month without a card. A fallback search costs 1 credit. Tavily bills page reads at 1 credit per 5 successful pages. Change the search order with `WEB_SEARCH_ENGINES`, and set `WEB_HEADLESS=0` to watch the browser.
+
+```bash
+uv run python agent.py "What changed in the latest Python release?"
+```
+
+## Tests
+
+```bash
+uv run pytest            # offline: fallback order, cooldowns, retries, caching
+uv run pytest -m live -rs  # live: checks Google, Bing, Tavily, page and PDF reading right now
+```
+
+The offline tests use fakes and run in well under a second. The live checks need a network and Chromium, and they use `TAVILY_API_KEY` from `.env` when it is set. A live check is skipped, with the reason listed, when a source is blocking us or isn't configured. A failure means something is broken, such as a search page whose layout changed.

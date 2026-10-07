@@ -5,8 +5,22 @@ description = "A Telegram agent built with LangChain"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "httpx>=0.28.1",
     "langchain>=1.0",
     "langchain-openai>=1.0",
+    "playwright>=1.63.0",
+    "pypdf>=6.19.0",
     "python-dotenv>=1.0",
     "python-telegram-bot>=22.8",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["live: hits real search engines, Tavily, and websites (run with -m live)"]
+addopts = "-m 'not live'"
