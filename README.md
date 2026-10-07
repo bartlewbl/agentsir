@@ -33,7 +33,7 @@ Message the bot in a private chat. `/reset` starts a fresh conversation. The bot
 
 While it is working, it edits a message with one line per thought and one line per call. When the answer is ready, that message becomes the answer, so the steps don't stay in the chat. `/debug` turns on technical mode for this chat: those steps stay, and the answer follows underneath. Send `/debug` again to turn it off. The mode lasts until then, or until the process stops.
 
-Conversation history stays in memory and is cleared when the process stops.
+Conversation history stays in memory and is cleared when the process stops. Facts saved with the memory tools live in a database per user and stay after `/reset` and after the process stops.
 
 You can try the same agent in the terminal:
 
@@ -56,6 +56,17 @@ def remember(text: str) -> str:
 ```
 
 Restart the bot. No other wiring is required. `tools/time.py` is the working example.
+
+## Memory
+
+Each user gets a SQLite database in `data/memory/` (override the directory with `MEMORY_DIR`). Telegram users are separated by their numeric id. The terminal agent uses the id `cli`.
+
+- `write_memory(text)` saves one fact. Saving the same fact again does not create a duplicate.
+- `read_memory()` lists saved facts, newest first. The model picks the relevant ones, so a question does not have to reuse the saved wording. A query is an optional exact-word filter, and a miss still returns the list.
+
+A vector database is not used. These are short personal facts, and one read is enough for the model to match them by meaning. Embeddings would matter only after one person had more facts than fit in that read.
+
+`/reset` clears the conversation and leaves the database in place.
 
 ## Web browsing
 
