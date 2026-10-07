@@ -1,8 +1,13 @@
 """Turn agent stream updates into a readable tool trace."""
 
+import re
+
 _THOUGHT_LIMIT = 1200
 _RESULT_LIMIT = 800
 _ARG_LIMIT = 200
+_STATUS_ARG_LIMIT = 240
+_STATUS_GIST_LIMIT = 80
+_STATUS_THOUGHT_LIMIT = 160
 
 
 def events_from_update(update, seen: set[str]) -> list[dict]:
@@ -53,6 +58,36 @@ def events_from_message(message) -> list[dict]:
 
 def format_trace(events: list[dict]) -> str:
     """Render tool calls with their results, in the order they happened."""
+    blocks = []
+    for row in _rows(events):
+        if row[0] == "thought":
+            blocks.append(_clip(row[1].strip(), _THOUGHT_LIMIT))
+            continue
+        _, name, args, result = row
+        lines = [_format_call(name, args)]
+        if result is not None:
+            body = _clip(result.strip() or "(empty)", _RESULT_LIMIT)
+            lines.append("← " + body.replace("\n", "\n  "))
+        blocks.append("\n".join(lines))
+    return "\n\n".join(block for block in blocks if block).strip()
+
+
+def format_status(events: list[dict]) -> str:
+    """One line per thought or tool."""
+    lines = []
+    for row in _rows(events):
+        if row[0] == "thought":
+            line = _one_line(row[1], _STATUS_THOUGHT_LIMIT)
+        else:
+            _, name, args, result = row
+            line = _status_line(name, args, result)
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _rows(events: list[dict]) -> list[tuple]:
+    """Pair each tool call with its result, keeping thoughts in order."""
     rows: list[tuple] = []
     calls_by_id: dict[str, int] = {}
 
@@ -79,19 +114,7 @@ def format_trace(events: list[dict]) -> str:
             continue
         _, name, args, _ = rows[index]
         rows[index] = ("tool", name, args, event.get("content") or "")
-
-    blocks = []
-    for row in rows:
-        if row[0] == "thought":
-            blocks.append(_clip(row[1].strip(), _THOUGHT_LIMIT))
-            continue
-        _, name, args, result = row
-        lines = [_format_call(name, args)]
-        if result is not None:
-            body = _clip(result.strip() or "(empty)", _RESULT_LIMIT)
-            lines.append("← " + body.replace("\n", "\n  "))
-        blocks.append("\n".join(lines))
-    return "\n\n".join(block for block in blocks if block).strip()
+    return rows
 
 
 def _messages_from_update(update) -> list:
@@ -196,6 +219,53 @@ def _format_call(name: str, args: dict) -> str:
         return f"→ {name}"
     rendered = ", ".join(f"{key}={_clip(value, _ARG_LIMIT)}" for key, value in args.items())
     return f"→ {name}({rendered})" if rendered else f"→ {name}"
+
+
+def _status_line(name: str, args: dict, result: str | None) -> str:
+    line = _call_signature(name, args)
+    if result is None:
+        return line
+    return f"{line} — {_result_gist(result)}"
+
+
+def _call_signature(name: str, args: dict) -> str:
+    if not args:
+        return f"→ {name}()"
+    rendered = ", ".join(f"{key}={_format_arg(value)}" for key, value in args.items())
+    return f"→ {name}({rendered})"
+
+
+def _format_arg(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = _one_line(value, _STATUS_ARG_LIMIT).replace('"', '\\"')
+    return f'"{text}"'
+
+
+def _result_gist(content: str) -> str:
+    raw = content.strip()
+    if not raw:
+        return "empty"
+    match = re.match(r"Results from\s+(\w+)", raw)
+    if match:
+        count = sum(1 for line in raw.splitlines() if re.match(r"\d+\.\s", line))
+        engine = match.group(1)
+        gist = f"{count} from {engine}" if count else f"from {engine}"
+        return _one_line(gist, _STATUS_GIST_LIMIT)
+    for line in raw.splitlines():
+        if line.startswith("Title:"):
+            title = line.split(":", 1)[1].strip()
+            if title and title != "(none)":
+                return _one_line(title, _STATUS_GIST_LIMIT)
+            break
+    return _one_line(raw, _STATUS_GIST_LIMIT)
+
+
+def _one_line(value, limit: int) -> str:
+    text = value if isinstance(value, str) else str(value)
+    return _clip(" ".join(text.split()), limit)
 
 
 def _clip(value, limit: int) -> str:

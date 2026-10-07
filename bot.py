@@ -20,7 +20,7 @@ from telegram.ext import (
 )
 
 from agent import aiter_events, build_agent, require_model_credentials
-from trace import format_trace
+from trace import format_status
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -111,7 +111,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_text(
         update,
         "Send me a message and I'll answer. "
-        "When I use a tool, that step shows up first. "
+        "While I'm working you can see each step. "
+        "/debug keeps those steps after the answer. "
         "/reset starts a fresh conversation.",
     )
 
@@ -121,6 +122,31 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     context.user_data["generation"] = context.user_data.get("generation", 0) + 1
     await reply_text(update, "Started a new conversation.")
+
+
+async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_unwanted(update, context):
+        return
+    enabled = not context.user_data.get("debug", False)
+    context.user_data["debug"] = enabled
+    if enabled:
+        await reply_text(
+            update,
+            "Technical mode is on. Thoughts and calls stay in the chat after each answer. "
+            "Send /debug again to turn it off.",
+        )
+        return
+    await reply_text(
+        update,
+        "Technical mode is off. Thoughts and calls disappear once the answer is ready.",
+    )
+
+
+def trace_after_answer(debug_mode: bool, steps: list[dict]) -> str:
+    """The step list to leave in the chat, empty unless technical mode is on."""
+    if not debug_mode:
+        return ""
+    return format_status(steps)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -148,7 +174,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 answer = event["text"]
                 continue
             steps.append(event)
-            rendered = format_trace(steps)
+            rendered = format_status(steps)
             if rendered:
                 await edit_text(status, fit_message(rendered))
     except Exception:
@@ -156,7 +182,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         answer = "Something went wrong while answering. Try again."
 
     answer = answer.strip() or "I don't have a reply for that."
-    trace = format_trace(steps)
+    trace = trace_after_answer(bool(context.user_data.get("debug")), steps)
     if trace:
         await edit_text(status, fit_message(trace))
         await reply_text(update, answer)
@@ -179,7 +205,7 @@ async def on_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_unwanted(update, context):
         return
-    await reply_text(update, "I don't know that command. Try /start or /reset.")
+    await reply_text(update, "I don't know that command. Try /start, /reset, or /debug.")
 
 
 def main() -> None:
@@ -196,6 +222,7 @@ def main() -> None:
     application.bot_data["allowed_ids"] = allowed_user_ids()
     application.add_handler(CommandHandler("start", start, filters=PRIVATE))
     application.add_handler(CommandHandler("reset", reset, filters=PRIVATE))
+    application.add_handler(CommandHandler("debug", debug, filters=PRIVATE))
     application.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(PRIVATE & filters.COMMAND, unknown_command))
     application.add_handler(MessageHandler(PRIVATE & ~filters.TEXT & ~filters.COMMAND, on_other))

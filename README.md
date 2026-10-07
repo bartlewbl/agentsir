@@ -31,7 +31,7 @@ uv run python bot.py
 
 Message the bot in a private chat. `/reset` starts a fresh conversation. The bot only replies in private chats.
 
-While it is working, it edits a message with each tool call and the result. The answer follows underneath. If the model returns reasoning text, that shows up in the same trace.
+While it is working, it edits a message with one line per thought and one line per call. When the answer is ready, that message becomes the answer, so the steps don't stay in the chat. `/debug` turns on technical mode for this chat: those steps stay, and the answer follows underneath. Send `/debug` again to turn it off. The mode lasts until then, or until the process stops.
 
 Conversation history stays in memory and is cleared when the process stops.
 
