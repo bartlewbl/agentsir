@@ -113,7 +113,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Send me a message and I'll answer. "
         "While I'm working you can see each step. "
         "/debug keeps those steps after the answer. "
-        "/reset starts a fresh conversation.",
+        "/reset starts a fresh conversation. "
+        "Things I remember about you stay after a reset.",
     )
 
 
@@ -121,7 +122,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_unwanted(update, context):
         return
     context.user_data["generation"] = context.user_data.get("generation", 0) + 1
-    await reply_text(update, "Started a new conversation.")
+    await reply_text(update, "Started a new conversation. Saved memories stay.")
 
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -169,6 +170,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.application.bot_data["agent"],
             question,
             thread_id=thread_id(update, context),
+            user_id=str(update.effective_user.id),
         ):
             if event["type"] == "answer":
                 answer = event["text"]

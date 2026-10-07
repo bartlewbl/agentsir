@@ -15,6 +15,9 @@ load_dotenv()
 SYSTEM_PROMPT = (
     "You are a helpful assistant chatting on Telegram. "
     "Be concise. Use your tools when they help. "
+    "Each person has a private memory that lasts after the chat is cleared. "
+    "Use read_memory with an empty query and pick the relevant facts yourself, "
+    "even when the wording differs. Use write_memory when they share a fact worth keeping. "
     "For current events or facts you are unsure of, search the web, open the most "
     "promising results, and follow links deeper when a page doesn't answer the question. "
     "Mention the URLs you relied on. "
@@ -32,8 +35,12 @@ def build_agent():
     )
 
 
-def iter_events(agent, question: str, *, thread_id: str):
-    config = {"configurable": {"thread_id": thread_id}}
+def _run_config(thread_id: str, user_id: str) -> dict:
+    return {"configurable": {"thread_id": thread_id, "user_id": str(user_id)}}
+
+
+def iter_events(agent, question: str, *, thread_id: str, user_id: str):
+    config = _run_config(thread_id, user_id)
     seen = _stored_message_ids(agent.get_state(config))
     for update in agent.stream(
         {"messages": [{"role": "user", "content": question}]},
@@ -43,8 +50,8 @@ def iter_events(agent, question: str, *, thread_id: str):
         yield from events_from_update(update, seen)
 
 
-async def aiter_events(agent, question: str, *, thread_id: str):
-    config = {"configurable": {"thread_id": thread_id}}
+async def aiter_events(agent, question: str, *, thread_id: str, user_id: str):
+    config = _run_config(thread_id, user_id)
     seen = _stored_message_ids(await agent.aget_state(config))
     async for update in agent.astream(
         {"messages": [{"role": "user", "content": question}]},
@@ -55,11 +62,11 @@ async def aiter_events(agent, question: str, *, thread_id: str):
             yield event
 
 
-def run_turn(agent, question: str, *, thread_id: str) -> tuple[str, str]:
+def run_turn(agent, question: str, *, thread_id: str, user_id: str) -> tuple[str, str]:
     """Run one turn and return the tool trace and the final answer."""
     steps = []
     answer = ""
-    for event in iter_events(agent, question, thread_id=thread_id):
+    for event in iter_events(agent, question, thread_id=thread_id, user_id=user_id):
         if event["type"] == "answer":
             answer = event["text"]
         else:
@@ -108,7 +115,7 @@ def main() -> None:
 
 
 def _print_turn(agent, question: str) -> None:
-    trace, answer = run_turn(agent, question, thread_id="cli")
+    trace, answer = run_turn(agent, question, thread_id="cli", user_id="cli")
     if trace:
         print(trace)
         print()
