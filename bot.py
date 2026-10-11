@@ -4,14 +4,21 @@ Run with: uv run python bot.py
 """
 
 import asyncio
+import html
 import logging
 import os
 
 import httpx
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction
-from telegram.error import BadRequest, RetryAfter
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -22,6 +29,15 @@ from telegram.ext import (
 )
 
 from agent import Agents, aiter_events, require_model_credentials
+from commands import (
+    COMMANDS,
+    command_name,
+    command_page,
+    find_command,
+    listed_commands,
+    overview,
+    unknown_command_reply,
+)
 from models import (
     PROVIDERS,
     ModelChoice,
@@ -33,7 +49,7 @@ from models import (
     parse_listing,
     provider_default,
 )
-from persona import apply_persona_command
+from persona import apply_persona_command, load_persona
 from trace import format_status
 
 logging.basicConfig(
@@ -45,6 +61,7 @@ logger = logging.getLogger("agentsir")
 TELEGRAM_LIMIT = 4000
 ALERT_LIMIT = 200
 PICKER_PAGE_SIZE = 8
+SETTING_LIMIT = 120
 PRIVATE = filters.ChatType.PRIVATE
 
 
@@ -73,6 +90,14 @@ async def reject_unwanted(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     allowed = context.application.bot_data["allowed_ids"]
     if allowed is not None and user.id not in allowed:
         await update.effective_message.reply_text("This bot is private.")
+        return True
+    return False
+
+
+async def reject_tap(query, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    allowed = context.application.bot_data["allowed_ids"]
+    if allowed is not None and query.from_user.id not in allowed:
+        await query.answer("This bot is private.")
         return True
     return False
 
@@ -128,13 +153,67 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update,
         "Send me a message and I'll answer. "
         "While I'm working you can see each step. "
-        "/debug keeps those steps after the answer. "
-        "/models lists the models I can run on, and /model or /provider picks one. "
-        "/reset starts a fresh conversation. "
         "Things I remember about you stay after a reset. "
-        "/persona names me or sets how I talk. "
-        "/persona bland makes me a plain agent again.",
+        "/help shows what the commands do, and typing / lists them.",
     )
+
+
+def current_settings(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
+    """What each setting is right now, for the help pages."""
+    saved = load_persona(str(user_id))
+    described = ", ".join(part for part in (saved.name, saved.style) if part) or "plain agent"
+    if len(described) > SETTING_LIMIT:
+        described = described[: SETTING_LIMIT - 1].rstrip() + "…"
+    steps = "kept after each answer" if context.user_data.get("debug") else "removed once the answer is ready"
+    return {
+        "model": f"Model: {current_model(context)}",
+        "persona": f"Persona: {described}",
+        "debug": f"Steps: {steps}",
+    }
+
+
+def help_view(topic: str, settings: dict[str, str]) -> tuple[str, InlineKeyboardMarkup]:
+    """The text and buttons for the command list, or for one command's page."""
+    command = find_command(topic)
+    if command is not None:
+        back = InlineKeyboardButton("◀ All commands", callback_data="help:")
+        return command_page(command, settings), InlineKeyboardMarkup([[back]])
+
+    buttons = [
+        InlineKeyboardButton(f"/{command.name}", callback_data=f"help:{command.name}")
+        for command in listed_commands()
+    ]
+    rows = [buttons[first : first + 2] for first in range(0, len(buttons), 2)]
+    text = overview(settings) + "\n\nTap a command below to see how to use it."
+    if topic:
+        missing = html.escape(command_name(topic)[:32])
+        text = f"There is no <code>/{missing}</code> command.\n\n{text}"
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_unwanted(update, context):
+        return
+    topic = context.args[0] if context.args else ""
+    text, buttons = help_view(topic, current_settings(update.effective_user.id, context))
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=buttons)
+
+
+async def on_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A tap on a button under a help page."""
+    query = update.callback_query
+    if await reject_tap(query, context):
+        return
+    await query.answer()
+    if query.message is None:
+        return
+    topic = query.data.removeprefix("help:")
+    text, buttons = help_view(topic, current_settings(query.from_user.id, context))
+    try:
+        await query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=buttons)
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            logger.warning("could not update help page: %s", exc)
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -307,9 +386,7 @@ async def provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """A tap on a button under the model list."""
     query = update.callback_query
-    allowed = context.application.bot_data["allowed_ids"]
-    if allowed is not None and query.from_user.id not in allowed:
-        await query.answer("This bot is private.")
+    if await reject_tap(query, context):
         return
     picker = context.user_data.get("picker")
     if picker is None or query.message is None or picker.get("message_id") != query.message.message_id:
@@ -419,11 +496,29 @@ async def on_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_unwanted(update, context):
         return
-    await reply_text(
-        update,
-        "I don't know that command. "
-        "Try /start, /reset, /debug, /models, /model, /provider, or /persona.",
-    )
+    typed = update.effective_message.text.split()[0]
+    await reply_text(update, f"{unknown_command_reply(typed)} /help lists every command.")
+
+
+HANDLERS = {
+    "start": start,
+    "reset": reset,
+    "persona": persona,
+    "models": models_list,
+    "model": model,
+    "provider": provider,
+    "debug": debug,
+    "help": help_command,
+}
+
+
+async def publish_commands(application: Application) -> None:
+    """Fill the menu Telegram shows when someone types / in a private chat."""
+    menu = [BotCommand(command.name, command.summary) for command in listed_commands()]
+    try:
+        await application.bot.set_my_commands(menu, scope=BotCommandScopeAllPrivateChats())
+    except TelegramError as exc:
+        logger.warning("could not publish the command menu: %s", exc)
 
 
 def main() -> None:
@@ -435,17 +530,13 @@ def main() -> None:
         )
     require_model_credentials()
 
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).post_init(publish_commands).build()
     application.bot_data["agents"] = Agents()
     application.bot_data["allowed_ids"] = allowed_user_ids()
-    application.add_handler(CommandHandler("start", start, filters=PRIVATE))
-    application.add_handler(CommandHandler("reset", reset, filters=PRIVATE))
-    application.add_handler(CommandHandler("debug", debug, filters=PRIVATE))
-    application.add_handler(CommandHandler("model", model, filters=PRIVATE))
-    application.add_handler(CommandHandler("models", models_list, filters=PRIVATE))
+    for command in COMMANDS:
+        application.add_handler(CommandHandler(command.name, HANDLERS[command.name], filters=PRIVATE))
     application.add_handler(CallbackQueryHandler(on_pick, pattern=r"^pick:"))
-    application.add_handler(CommandHandler("provider", provider, filters=PRIVATE))
-    application.add_handler(CommandHandler("persona", persona, filters=PRIVATE))
+    application.add_handler(CallbackQueryHandler(on_help, pattern=r"^help:"))
     application.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(PRIVATE & filters.COMMAND, unknown_command))
     application.add_handler(MessageHandler(PRIVATE & ~filters.TEXT & ~filters.COMMAND, on_other))

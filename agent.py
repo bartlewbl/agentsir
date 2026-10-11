@@ -10,6 +10,7 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_config
 
+from commands import terminal_help
 from models import (
     PROVIDERS,
     ModelChoice,
@@ -164,8 +165,7 @@ def main() -> None:
         return
 
     print(
-        f"Agent ready on {choice}. Ask a question, /models to list models, "
-        "/model to switch, /persona, or quit."
+        f"Agent ready on {choice}. Ask a question, send /help for the commands, or quit."
     )
     while True:
         try:
@@ -177,6 +177,9 @@ def main() -> None:
             continue
         if question.lower() in {"quit", "exit"}:
             return
+        if question.split()[0] == "/help":
+            print(terminal_help(question[len("/help") :]))
+            continue
         if question.split()[0] == "/model":
             choice = _switch_model(choice, question[len("/model") :])
             continue
