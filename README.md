@@ -29,7 +29,7 @@ TELEGRAM_ALLOWED_USER_IDS=123456789
 uv run python bot.py
 ```
 
-Message the bot in a private chat. `/reset` starts a fresh conversation. The bot only replies in private chats.
+Message the bot in a private chat. `/reset` starts a fresh conversation. `/persona` gives the agent a name and a manner, or `/persona bland` makes it a plain agent again. That setting stays after `/reset`. The bot only replies in private chats.
 
 While it is working, it edits a message with one line per thought and one line per call. When the answer is ready, that message becomes the answer, so the steps don't stay in the chat. `/debug` turns on technical mode for this chat: those steps stay, and the answer follows underneath. Send `/debug` again to turn it off. The mode lasts until then, or until the process stops.
 
@@ -67,6 +67,19 @@ Each user gets a SQLite database in `data/memory/` (override the directory with 
 A vector database is not used. These are short personal facts, and one read is enough for the model to match them by meaning. Embeddings would matter only after one person had more facts than fit in that read.
 
 `/reset` clears the conversation and leaves the database in place.
+
+## Persona
+
+`/persona` sets how the agent presents itself to you. It is stored in your memory database and lasts after `/reset` and after the process stops. Another person's setting is separate.
+
+- `/persona` shows the current name and manner.
+- `/persona name Ada` sets the name and leaves the manner unchanged.
+- `/persona style brief and a little dry` sets the manner and leaves the name unchanged.
+- `/persona bland` clears both. The agent is plain again: no name and no extra personality.
+
+The name and manner change the voice only. Tools, saved facts, and the need to be accurate stay as they are. With a name and no manner, it is still a plain, capable agent.
+
+The same command works in the terminal agent (`/persona name Ada`). That agent uses the user id `cli`.
 
 ## Web browsing
 
