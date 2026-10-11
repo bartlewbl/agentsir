@@ -411,6 +411,8 @@ def require_model_credentials() -> None:
         )
     reasoning_effort()
     step_limit()
+    # Lambda functions are asked for their tools here, not during the first message.
+    load_tools()
 
 
 def main() -> None:

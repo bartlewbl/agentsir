@@ -15,8 +15,14 @@ dependencies = [
     "python-telegram-bot>=22.8",
 ]
 
+[project.optional-dependencies]
+lambda = [
+    "boto3>=1.40",
+]
+
 [dependency-groups]
 dev = [
+    "boto3>=1.40",
     "pytest>=9.1.1",
 ]
 
