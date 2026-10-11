@@ -29,7 +29,7 @@ TELEGRAM_ALLOWED_USER_IDS=123456789
 uv run python bot.py
 ```
 
-Message the bot in a private chat. `/reset` starts a fresh conversation. `/persona` gives the agent a name and a manner, or `/persona bland` makes it a plain agent again. That setting stays after `/reset`. The bot only replies in private chats.
+Message the bot in a private chat. `/help` explains every command, and typing `/` lists them. `/reset` starts a fresh conversation. `/persona` gives the agent a name and a manner, or `/persona bland` makes it a plain agent again. That setting stays after `/reset`. The bot only replies in private chats.
 
 While it is working, it edits a message with one line per thought and one line per call. When the answer is ready, that message becomes the answer, so the steps don't stay in the chat. `/debug` turns on technical mode for this chat: those steps stay, and the answer follows underneath. Send `/debug` again to turn it off. The mode lasts until then, or until the process stops.
 
@@ -40,6 +40,19 @@ You can try the same agent in the terminal:
 ```bash
 uv run python agent.py "What time is it?"
 ```
+
+## Commands
+
+Every command is described once, in `COMMANDS` in `commands.py`. Four things read that list:
+
+- The menu Telegram shows when you type `/`. The bot publishes it for private chats each time it starts, so nothing has to be set up in BotFather. `/start` is left out.
+- `/help`, which lists the commands by group with your current model, persona, and technical mode underneath. Each command has a button. Tap one and the message becomes that command's page: what to type, what it does, and how long the setting lasts. `◀ All commands` goes back. `/help model` opens a page directly.
+- The reply to a command that doesn't exist, which names the nearest real one: `/modle` gets "Did you mean /model?".
+- `/help` in the terminal chat, which lists only the commands that work there.
+
+Commands on a help page are in monospace, so a tap copies them and does not run them. Reading the help never resets a conversation or flips a setting. To run a command, type it or pick it from the `/` menu.
+
+To add a command, add an entry to `COMMANDS` and its function to `HANDLERS` in `bot.py`. The bot registers handlers from the list, so a command without an entry is not registered, and an entry without a function stops the bot at startup. A test checks that the two match.
 
 ## Choosing the model
 
@@ -61,7 +74,7 @@ You can also type a choice:
 
 The conversation continues across a switch. A provider without a key is refused. Typed model names aren't checked in advance, so a typo shows up as an error on your next message, and `/model` fixes it. The choice is per chat and lasts until the process stops, like `/debug`. To add a provider, add an entry to `PROVIDERS` in `models.py`, teach `list_models` where its list lives, and install its LangChain package.
 
-The terminal chat takes `/models` and `/model` too, with the list printed as text.
+The terminal chat takes `/models` and `/model` too, with the list printed as text. `/help` there lists what it takes.
 
 ## Add a tool
 
