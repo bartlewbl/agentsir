@@ -19,7 +19,7 @@ TELEGRAM_BOT_TOKEN=123456:abc...
 TELEGRAM_ALLOWED_USER_IDS=123456789
 ```
 
-`AGENT_MODEL` is any LangChain model string (`provider:model`). Other providers need their own package and API key, for example `anthropic:claude-sonnet-4-6` with `ANTHROPIC_API_KEY`.
+`AGENT_MODEL` is the default model, written `provider:model`. OpenAI and [OpenRouter](https://openrouter.ai) work out of the box. OpenRouter needs `OPENROUTER_API_KEY` and takes its own model ids, for example `openrouter:anthropic/claude-sonnet-4.5`. Any other LangChain provider works as the default once you install its package and set its key, for example `anthropic:claude-sonnet-4-6` with `ANTHROPIC_API_KEY`.
 
 `TELEGRAM_ALLOWED_USER_IDS` limits who can talk to the bot. Leave it empty to allow anyone. Your numeric id is logged when you message the bot, and [@userinfobot](https://t.me/userinfobot) will tell you as well.
 
@@ -40,6 +40,28 @@ You can try the same agent in the terminal:
 ```bash
 uv run python agent.py "What time is it?"
 ```
+
+## Choosing the model
+
+`/models` lists the models you can pick, as buttons. Tap one to use it.
+
+- `/models` lists the current provider's models, newest first, eight to a page.
+- `/models mini` keeps the ids that contain every word you give.
+- `/models openrouter claude sonnet` lists another provider. The button under the list switches provider too.
+
+The lists are loaded live and kept for an hour. OpenAI's is the chat models your key can see, without dated snapshots. OpenRouter's is the models that can call tools, which the agent needs. A few listed OpenAI models may still refuse a chat with tools. If one does, the error says so, and you can pick another.
+
+You can also type a choice:
+
+- `/model` shows the current model and the same list.
+- `/model gpt-4.1` changes the model and keeps the provider.
+- `/model openrouter anthropic/claude-sonnet-4.5` (or `openrouter:anthropic/claude-sonnet-4.5`) changes both. Any id works, listed or not.
+- `/provider openrouter` switches provider and uses its default model: the one in `AGENT_MODEL` if it is on that provider, otherwise `gpt-4.1-mini` on OpenAI or `openai/gpt-4.1-mini` on OpenRouter.
+- `/model default` goes back to `AGENT_MODEL`.
+
+The conversation continues across a switch. A provider without a key is refused. Typed model names aren't checked in advance, so a typo shows up as an error on your next message, and `/model` fixes it. The choice is per chat and lasts until the process stops, like `/debug`. To add a provider, add an entry to `PROVIDERS` in `models.py`, teach `list_models` where its list lives, and install its LangChain package.
+
+The terminal chat takes `/models` and `/model` too, with the list printed as text.
 
 ## Add a tool
 
