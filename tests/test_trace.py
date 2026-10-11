@@ -1,6 +1,8 @@
 """Telegram status lines show the call, on one line, without the result body."""
 
-from trace import format_status
+from langchain_core.messages import AIMessage
+
+from trace import events_from_message, format_status
 
 
 def test_status_shows_the_call_and_a_result_gist():
@@ -38,10 +40,12 @@ def test_status_shows_the_call_and_a_result_gist():
     assert lines[0].startswith("I should search")
     assert lines[0].endswith("…")
     assert len(lines[0]) <= 160
-    assert lines[1:] == [
-        '→ web_search(query="latest python release", max_results=8) — 2 from google',
-        '→ open_page(url="https://www.python.org/downloads/", part=1) — Python Releases',
-    ]
+    assert lines[1] == '→ web_search(query="latest python release", max_results=8) — 2 from google'
+    assert lines[2].replace("\u200b", "") == (
+        '→ open_page(url="https://www.python.org/downloads/", part=1) — Python Releases'
+    )
+    assert "https://www.python.org/downloads/" not in lines[2]
+    assert "https://\u200bwww.python.org/downloads/" in lines[2]
     assert "page text" not in text
 
 
@@ -90,3 +94,41 @@ def test_status_clips_a_long_result_without_touching_the_call():
     assert line.startswith('→ remember(text="buy milk") — Noted:')
     assert line.endswith("…")
     assert "buy milk" in line
+
+
+def test_status_gists_a_file_instead_of_its_body():
+    events = [
+        {
+            "type": "call",
+            "id": "1",
+            "name": "read_file",
+            "args": {"path": "notes.txt", "part": 1},
+        },
+        {
+            "type": "result",
+            "id": "1",
+            "name": "read_file",
+            "content": "File: notes.txt\nPart 1 of 2\n\n" + ("budget line\n" * 30),
+        },
+    ]
+    assert format_status(events) == (
+        '→ read_file(path="notes.txt", part=1) — notes.txt, Part 1 of 2'
+    )
+
+
+def test_a_reasoning_summary_shows_up_as_separate_thoughts():
+    message = AIMessage(
+        content=[
+            {
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": "The file is a budget."},
+                    {"type": "summary_text", "text": "The total does not match the rows."},
+                ],
+            }
+        ],
+        response_metadata={"model_provider": "openai", "output_version": "v1"},
+    )
+    assert format_status(events_from_message(message)) == (
+        "The file is a budget.\nThe total does not match the rows."
+    )

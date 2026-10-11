@@ -83,7 +83,7 @@ def format_status(events: list[dict]) -> str:
             line = _status_line(name, args, result)
         if line:
             lines.append(line)
-    return "\n".join(lines)
+    return _unlink("\n".join(lines))
 
 
 def _rows(events: list[dict]) -> list[tuple]:
@@ -178,11 +178,29 @@ def _thoughts(message) -> list[str]:
     for block in blocks:
         if not isinstance(block, dict) or block.get("type") not in {"reasoning", "thinking"}:
             continue
-        text = block.get("reasoning") or block.get("thinking") or block.get("text") or ""
-        text = str(text).strip()
-        if text:
-            thoughts.append(text)
+        thoughts.extend(_reasoning_lines(block))
     return thoughts
+
+
+def _reasoning_lines(block: dict) -> list[str]:
+    """One thought per summary part, so a long spree shows up as several lines."""
+    summary = block.get("summary")
+    if isinstance(summary, list):
+        lines = []
+        for part in summary:
+            if isinstance(part, str):
+                text = part.strip()
+            elif isinstance(part, dict):
+                text = str(part.get("text") or part.get("reasoning") or "").strip()
+            else:
+                text = ""
+            if text:
+                lines.append(text)
+        if lines:
+            return lines
+    text = block.get("reasoning") or block.get("thinking") or block.get("text") or ""
+    text = str(text).strip()
+    return [text] if text else []
 
 
 def _call_parts(call) -> tuple[str, dict, str]:
@@ -260,7 +278,22 @@ def _result_gist(content: str) -> str:
             if title and title != "(none)":
                 return _one_line(title, _STATUS_GIST_LIMIT)
             break
+    file_name = None
+    part = None
+    for line in raw.splitlines()[:6]:
+        if file_name is None and line.startswith("File:"):
+            file_name = line.split(":", 1)[1].strip()
+        elif part is None and line.startswith("Part "):
+            part = line.strip()
+    if file_name:
+        gist = f"{file_name}, {part}" if part else file_name
+        return _one_line(gist, _STATUS_GIST_LIMIT)
     return _one_line(raw, _STATUS_GIST_LIMIT)
+
+
+def _unlink(text: str) -> str:
+    """Break URL detection so Telegram shows the address as text, without a site card."""
+    return re.sub(r"(?i)https?://", lambda match: match.group(0) + "\u200b", text)
 
 
 def _one_line(value, limit: int) -> str:

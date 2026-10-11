@@ -4,12 +4,16 @@ Run with: uv run python bot.py
 """
 
 import asyncio
+import base64
+import contextlib
 import logging
 import os
+from io import BytesIO
 
 import httpx
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from langgraph.errors import GraphRecursionError
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
@@ -21,7 +25,7 @@ from telegram.ext import (
     filters,
 )
 
-from agent import Agents, aiter_events, require_model_credentials
+from agent import Agents, aiter_events, prepare_turn, reasoning_command, require_model_credentials
 from models import (
     PROVIDERS,
     ModelChoice,
@@ -34,6 +38,7 @@ from models import (
     provider_default,
 )
 from persona import apply_persona_command
+from tools.files import describe_upload, forget_uploads, is_image, remember_upload
 from trace import format_status
 
 logging.basicConfig(
@@ -44,8 +49,10 @@ logger = logging.getLogger("agentsir")
 
 TELEGRAM_LIMIT = 4000
 ALERT_LIMIT = 200
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 PICKER_PAGE_SIZE = 8
 PRIVATE = filters.ChatType.PRIVATE
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 def allowed_user_ids() -> set[int] | None:
@@ -106,10 +113,13 @@ def fit_message(text: str) -> str:
     return "…\n" + text[-(TELEGRAM_LIMIT - 2) :].lstrip()
 
 
-async def edit_text(message, text: str) -> bool:
+async def edit_text(message, text: str, *, link_preview: bool = True) -> bool:
+    # Leave the default call alone so a model-list edit stays a plain edit.
+    # Status lines pass link_preview=False so a page address doesn't grow a site card.
+    kwargs = {} if link_preview else {"link_preview_options": NO_PREVIEW}
     for _ in range(2):
         try:
-            await message.edit_text(text)
+            await message.edit_text(text, **kwargs)
             return True
         except RetryAfter as exc:
             await asyncio.sleep(exc.retry_after + 0.1)
@@ -126,10 +136,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await reply_text(
         update,
-        "Send me a message and I'll answer. "
+        "Send me a message, a photo, or a file and I'll answer. "
         "While I'm working you can see each step. "
         "/debug keeps those steps after the answer. "
         "/models lists the models I can run on, and /model or /provider picks one. "
+        "/reasoning sets how long I think, or /reasoning auto. "
         "/reset starts a fresh conversation. "
         "Things I remember about you stay after a reset. "
         "/persona names me or sets how I talk. "
@@ -141,6 +152,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_unwanted(update, context):
         return
     context.user_data["generation"] = context.user_data.get("generation", 0) + 1
+    forget_uploads(update.effective_user.id)
     await reply_text(update, "Started a new conversation. Saved memories and your persona stay.")
 
 
@@ -151,6 +163,21 @@ async def persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update,
         apply_persona_command(str(update.effective_user.id), list(context.args or [])),
     )
+
+
+async def reasoning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_unwanted(update, context):
+        return
+    mode, reply = reasoning_command(
+        context.user_data.get("reasoning"),
+        " ".join(context.args),
+        current_model(context),
+    )
+    if mode is None:
+        context.user_data.pop("reasoning", None)
+    else:
+        context.user_data["reasoning"] = mode
+    await reply_text(update, reply)
 
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -358,62 +385,152 @@ def trace_after_answer(debug_mode: bool, steps: list[dict]) -> str:
     return format_status(steps)
 
 
+def _question(context: ContextTypes.DEFAULT_TYPE, question):
+    return prepare_turn(question, context.user_data.get("reasoning"), current_model(context))
+
+
+def image_message(caption: str, data: bytes, mime: str) -> list[dict]:
+    """A user turn the model can see: the caption plus the picture."""
+    ask = caption.strip() or "Look at this image and describe what matters."
+    return [
+        {"type": "text", "text": ask},
+        {
+            "type": "image",
+            "base64": base64.b64encode(data).decode("ascii"),
+            "mime_type": mime or "image/jpeg",
+        },
+    ]
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_unwanted(update, context):
         return
     question = update.effective_message.text
     if not question or not question.strip():
         return
-
     logger.info("message from user %s", update.effective_user.id)
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action=ChatAction.TYPING,
+    await _answer(update, context, question)
+
+
+async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_unwanted(update, context):
+        return
+    try:
+        question = await _incoming_file(update, context)
+    except ValueError as exc:
+        await reply_text(update, str(exc))
+        return
+    except Exception:
+        logger.exception("could not read the file")
+        await reply_text(update, "I couldn't read that file.")
+        return
+    logger.info("file from user %s", update.effective_user.id)
+    await _answer(update, context, question)
+
+
+async def _incoming_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    caption = message.caption or ""
+    if message.photo:
+        photo = message.photo[-1]
+        data = await _download(context, photo.file_id, photo.file_size)
+        return image_message(caption, data, "image/jpeg")
+
+    document = message.document
+    name = document.file_name or "file"
+    mime = document.mime_type or ""
+    data = await _download(context, document.file_id, document.file_size)
+    if is_image(name, mime):
+        return image_message(caption, data, mime or "image/jpeg")
+    file_id = remember_upload(update.effective_user.id, name, data)
+    return describe_upload(file_id, caption)
+
+
+async def _download(context: ContextTypes.DEFAULT_TYPE, file_id: str, size: int | None) -> bytes:
+    if size and size > MAX_UPLOAD_BYTES:
+        raise ValueError("That file is too big for me to read. Send one under 15 MB.")
+    buffer = BytesIO()
+    telegram_file = await context.bot.get_file(file_id)
+    await telegram_file.download_to_memory(buffer)
+    data = buffer.getvalue()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ValueError("That file is too big for me to read. Send one under 15 MB.")
+    return data
+
+
+async def _keep_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
+    """Refresh the typing indicator through a long reasoning spree."""
+    while not stop.is_set():
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            logger.debug("typing indicator failed", exc_info=True)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=4)
+
+
+async def _answer(update: Update, context: ContextTypes.DEFAULT_TYPE, question) -> None:
+    stop = asyncio.Event()
+    typing_task = asyncio.create_task(
+        _keep_typing(context.bot, update.effective_chat.id, stop)
     )
-    status = await update.effective_message.reply_text("Thinking…")
     steps = []
     answer = ""
     choice = current_model(context)
     try:
-        async for event in aiter_events(
-            context.application.bot_data["agents"].get(choice),
-            question,
-            thread_id=thread_id(update, context),
-            user_id=str(update.effective_user.id),
-        ):
-            if event["type"] == "answer":
-                answer = event["text"]
-                continue
-            steps.append(event)
-            rendered = format_status(steps)
-            if rendered:
-                await edit_text(status, fit_message(rendered))
-    except Exception as exc:
-        logger.exception("agent failed on %s", choice)
-        answer = (
-            f"Something went wrong while answering with {choice}: {str(exc)[:300]}\n\n"
-            "Try again, or pick another model with /model."
-        )
+        status = await update.effective_message.reply_text("Thinking…")
+        try:
+            async for event in aiter_events(
+                context.application.bot_data["agents"].get(choice),
+                _question(context, question),
+                thread_id=thread_id(update, context),
+                user_id=str(update.effective_user.id),
+            ):
+                if event["type"] == "answer":
+                    answer = event["text"]
+                    continue
+                steps.append(event)
+                rendered = format_status(steps)
+                if rendered:
+                    await edit_text(status, fit_message(rendered), link_preview=False)
+        except GraphRecursionError:
+            logger.exception("agent hit the step limit")
+            if not answer.strip():
+                answer = (
+                    "I stopped because that took too many steps. "
+                    "Ask me to continue and I'll pick up where I left off."
+                )
+        except Exception as exc:
+            logger.exception("agent failed on %s", choice)
+            answer = (
+                f"Something went wrong while answering with {choice}: {str(exc)[:300]}\n\n"
+                "Try again, or pick another model with /model."
+            )
 
-    answer = answer.strip() or "I don't have a reply for that."
-    trace = trace_after_answer(bool(context.user_data.get("debug")), steps)
-    if trace:
-        await edit_text(status, fit_message(trace))
-        await reply_text(update, answer)
-        return
+        answer = answer.strip() or "I don't have a reply for that."
+        trace = trace_after_answer(bool(context.user_data.get("debug")), steps)
+        if trace:
+            await edit_text(status, fit_message(trace), link_preview=False)
+            await reply_text(update, answer)
+            return
 
-    chunks = text_chunks(answer)
-    if not await edit_text(status, chunks[0]):
-        await reply_text(update, answer)
-        return
-    for part in chunks[1:]:
-        await update.effective_message.reply_text(part)
+        chunks = text_chunks(answer)
+        if not await edit_text(status, chunks[0]):
+            await reply_text(update, answer)
+            return
+        for part in chunks[1:]:
+            await update.effective_message.reply_text(part)
+    finally:
+        stop.set()
+        typing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await typing_task
 
 
 async def on_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_unwanted(update, context):
         return
-    await reply_text(update, "Send a text message.")
+    await reply_text(update, "Send a text message, a photo, or a file.")
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -422,7 +539,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await reply_text(
         update,
         "I don't know that command. "
-        "Try /start, /reset, /debug, /models, /model, /provider, or /persona.",
+        "Try /start, /reset, /debug, /models, /model, /provider, /reasoning, or /persona.",
     )
 
 
@@ -441,12 +558,16 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start, filters=PRIVATE))
     application.add_handler(CommandHandler("reset", reset, filters=PRIVATE))
     application.add_handler(CommandHandler("debug", debug, filters=PRIVATE))
+    application.add_handler(CommandHandler("reasoning", reasoning, filters=PRIVATE))
     application.add_handler(CommandHandler("model", model, filters=PRIVATE))
     application.add_handler(CommandHandler("models", models_list, filters=PRIVATE))
     application.add_handler(CallbackQueryHandler(on_pick, pattern=r"^pick:"))
     application.add_handler(CommandHandler("provider", provider, filters=PRIVATE))
     application.add_handler(CommandHandler("persona", persona, filters=PRIVATE))
     application.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, on_text))
+    application.add_handler(
+        MessageHandler(PRIVATE & (filters.Document.ALL | filters.PHOTO), on_file)
+    )
     application.add_handler(MessageHandler(PRIVATE & filters.COMMAND, unknown_command))
     application.add_handler(MessageHandler(PRIVATE & ~filters.TEXT & ~filters.COMMAND, on_other))
 

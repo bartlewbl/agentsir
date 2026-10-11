@@ -31,7 +31,11 @@ uv run python bot.py
 
 Message the bot in a private chat. `/reset` starts a fresh conversation. `/persona` gives the agent a name and a manner, or `/persona bland` makes it a plain agent again. That setting stays after `/reset`. The bot only replies in private chats.
 
-While it is working, it edits a message with one line per thought and one line per call. When the answer is ready, that message becomes the answer, so the steps don't stay in the chat. `/debug` turns on technical mode for this chat: those steps stay, and the answer follows underneath. Send `/debug` again to turn it off. The mode lasts until then, or until the process stops.
+While it is working, it edits a message with one line per thought and one line per call. Page addresses stay plain text, so Telegram doesn't attach a site preview. When the answer is ready, that message becomes the answer, so the steps don't stay in the chat. `/debug` turns on technical mode for this chat: those steps stay, and the answer follows underneath. Send `/debug` again to turn it off. The mode lasts until then, or until the process stops.
+
+On GPT-5 and GPT-6, each step can be a long reasoning spree. The summary of that reasoning is what shows up as the thought lines. On GPT-6, `/reasoning` shows the level for this chat. `/reasoning high` pins one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. `/reasoning auto` lets the message decide: short chats stay light, and files, analysis, and long questions take a long spree. `/reasoning default` goes back to the startup level. That level is `xhigh` unless `AGENT_REASONING_EFFORT` says otherwise, and the choice lasts until the process stops. One reply can take `AGENT_STEP_LIMIT` model and tool steps (default 100). If it hits that, it says so, and you can ask it to continue.
+
+Send a photo or a file in the chat, with a caption if you want. Text, source code, and PDFs are read and analyzed. Pictures are looked at directly.
 
 Conversation history stays in memory and is cleared when the process stops. Facts saved with the memory tools live in a database per user and stay after `/reset` and after the process stops.
 
@@ -61,7 +65,7 @@ You can also type a choice:
 
 The conversation continues across a switch. A provider without a key is refused. Typed model names aren't checked in advance, so a typo shows up as an error on your next message, and `/model` fixes it. The choice is per chat and lasts until the process stops, like `/debug`. To add a provider, add an entry to `PROVIDERS` in `models.py`, teach `list_models` where its list lives, and install its LangChain package.
 
-The terminal chat takes `/models` and `/model` too, with the list printed as text.
+The terminal chat takes `/models`, `/model`, and `/reasoning` too, with the list printed as text.
 
 ## Add a tool
 
@@ -120,6 +124,20 @@ Tavily is optional. Without `TAVILY_API_KEY`, only the browser is used. A free k
 
 ```bash
 uv run python agent.py "What changed in the latest Python release?"
+```
+
+## Files
+
+`tools/files.py` gives the agent three tools, rooted at the directory you start it in. Set `AGENT_FILES_ROOT` to point somewhere else.
+
+- `list_files(path)` lists one folder.
+- `search_files(query, path)` finds a word or phrase.
+- `read_file(path, part=1)` returns a file's text. Long files come in parts. PDFs work too.
+
+Files that look like secrets (`.env`, private keys) are skipped. The agent reads the parts it needs and analyzes them before it answers.
+
+```bash
+uv run python agent.py "Read README.md and tell me how to add a tool."
 ```
 
 ## Tests
