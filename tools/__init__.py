@@ -19,5 +19,10 @@ def load_tools() -> list:
             continue
         importlib.import_module(f"{__name__}.{module.name}")
 
+    # Imported here so a Lambda zip can carry tool modules without LangChain.
+    from lambdas.agent_tools import lambda_tools
+
+    TOOLS.extend(lambda_tools({fn.__name__ for fn in TOOLS}))
+
     _loaded = True
     return list(TOOLS)

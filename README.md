@@ -83,6 +83,55 @@ def remember(text: str) -> str:
 
 Restart the bot. No other wiring is required. `tools/time.py` is the working example.
 
+## Lambda tools
+
+A tool can run in an AWS Lambda function instead of in the bot's process. The agent calls it like any other tool. `lambdas/` holds the pieces:
+
+- `protocol.py` is the JSON both sides speak: one request to list a function's tools and one to call a tool.
+- `handler.py` is the Lambda side. It turns plain functions into a Lambda handler.
+- `client.py` and `agent_tools.py` are the agent side. They call a function through boto3 and hand its tools to the agent.
+- `example.py` is a function to copy. Its one tool, `lambda_status`, says which function answered.
+
+Write the tool as a plain function. The docstring and argument types are what the model sees, as with a local tool.
+
+```python
+# lambdas/weather.py
+from lambdas.handler import make_handler
+
+def weather(city: str, days: int = 1) -> str:
+    """Return the forecast for a city."""
+    ...
+
+handler = make_handler([weather])
+```
+
+Arguments can be `str`, `int`, `float`, `bool`, `list`, `dict`, or a `Literal`, with or without a default. A function that takes an argument named `context` receives `user_id`, `thread_id`, and `call_id` from the agent. The model doesn't see that argument and can't set it.
+
+The Lambda side uses the standard library only, so the zip is those files and nothing else. Add your own packages to the zip if a tool needs them.
+
+```bash
+zip -r function.zip lambdas/__init__.py lambdas/protocol.py lambdas/handler.py lambdas/example.py
+aws lambda create-function --function-name agentsir-example \
+  --runtime python3.13 --handler lambdas.example.handler \
+  --zip-file fileb://function.zip --role <execution role ARN>
+```
+
+Then tell the agent about the function:
+
+```bash
+uv sync --extra lambda
+LAMBDA_TOOL_FUNCTIONS=agentsir-example
+```
+
+`LAMBDA_TOOL_FUNCTIONS` takes names or ARNs, separated by commas. Credentials and region come from the usual AWS settings, and the agent's identity needs `lambda:InvokeFunction` on each function. Only the agent should have it, because the function trusts the `user_id` it is sent.
+
+- Each function is asked for its tools when the agent starts. Restart to pick up a new tool.
+- A function that can't be reached is logged and skipped. The agent starts without its tools.
+- A local tool wins over a Lambda tool with the same name, and an earlier function wins over a later one. The skipped tool is logged.
+- A call is sent once and never retried, so a tool that sends or saves something can't run twice. It waits `LAMBDA_TOOL_TIMEOUT` seconds (default 60).
+- When a call fails, the agent is told why and says so in its answer.
+- A result longer than 20,000 characters is cut.
+
 ## Memory
 
 Each user gets a SQLite database in `data/memory/` (override the directory with `MEMORY_DIR`). Telegram users are separated by their numeric id. The terminal agent uses the id `cli`.
