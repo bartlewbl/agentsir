@@ -1,16 +1,30 @@
 """LangChain agent used by the Telegram bot and the local chat."""
 
-import os
+import asyncio
 import sys
 
+import httpx
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
 
+from models import (
+    PROVIDERS,
+    ModelChoice,
+    default_choice,
+    describe_providers,
+    filter_models,
+    list_models,
+    missing_key,
+    parse_choice,
+    parse_listing,
+)
 from tools import load_tools
 from trace import events_from_update, format_trace
 
 load_dotenv()
+
+_LIST_LIMIT = 40
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant chatting on Telegram. "
@@ -25,14 +39,32 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_agent():
-    model = os.environ.get("AGENT_MODEL", "openai:gpt-4.1-mini")
+def build_agent(choice: ModelChoice | None = None, checkpointer=None):
+    choice = choice or default_choice()
     return create_agent(
-        model=model,
+        model=str(choice),
         tools=load_tools(),
         system_prompt=SYSTEM_PROMPT,
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer or InMemorySaver(),
     )
+
+
+class Agents:
+    """One agent per model, all sharing one conversation store.
+
+    Switching models keeps the conversation, because every agent reads and
+    writes the same history.
+    """
+
+    def __init__(self):
+        self._checkpointer = InMemorySaver()
+        self._agents = {}
+
+    def get(self, choice: ModelChoice | None = None):
+        choice = choice or default_choice()
+        if choice not in self._agents:
+            self._agents[choice] = build_agent(choice, self._checkpointer)
+        return self._agents[choice]
 
 
 def _run_config(thread_id: str, user_id: str) -> dict:
@@ -84,23 +116,24 @@ def _stored_message_ids(snapshot) -> set[str]:
 
 
 def require_model_credentials() -> None:
-    model = os.environ.get("AGENT_MODEL", "openai:gpt-4.1-mini")
-    if model.startswith("openai:") and not os.environ.get("OPENAI_API_KEY"):
+    key = missing_key(default_choice())
+    if key:
         raise SystemExit(
-            "Set OPENAI_API_KEY in the environment or a .env file. "
+            f"Set {key} in the environment or a .env file, or change AGENT_MODEL. "
             "Copy .env.example to .env to get started."
         )
 
 
 def main() -> None:
     require_model_credentials()
-    agent = build_agent()
+    agents = Agents()
+    choice = default_choice()
 
     if len(sys.argv) > 1:
-        _print_turn(agent, " ".join(sys.argv[1:]))
+        _print_turn(agents.get(choice), " ".join(sys.argv[1:]))
         return
 
-    print("Agent ready. Ask a question, or type quit.")
+    print(f"Agent ready on {choice}. Ask a question, /models to list models, /model to switch, or quit.")
     while True:
         try:
             question = input("> ").strip()
@@ -111,7 +144,46 @@ def main() -> None:
             continue
         if question.lower() in {"quit", "exit"}:
             return
-        _print_turn(agent, question)
+        if question.split()[0] == "/model":
+            choice = _switch_model(choice, question[len("/model") :])
+            continue
+        if question.split()[0] == "/models":
+            _print_models(choice, question[len("/models") :])
+            continue
+        _print_turn(agents.get(choice), question)
+
+
+def _print_models(current: ModelChoice, args: str) -> None:
+    provider, search = parse_listing(args, current)
+    try:
+        models = filter_models(asyncio.run(list_models(provider)), search)
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        print(f"Couldn't load the {provider} model list ({exc}). See {PROVIDERS[provider].models_url}")
+        return
+    if not models:
+        print(f"No {provider} models match. Try fewer words.")
+        return
+    print("\n".join(models[:_LIST_LIMIT]))
+    if len(models) > _LIST_LIMIT:
+        print(f"… and {len(models) - _LIST_LIMIT} more. Narrow it with /models {provider} <words>.")
+    print(f"Pick one with /model {provider} <id>.")
+
+
+def _switch_model(current: ModelChoice, args: str) -> ModelChoice:
+    if not args.strip():
+        print(f"Model: {current}\n{describe_providers()}\n/models lists what each provider offers.")
+        return current
+    try:
+        choice = parse_choice(args, current)
+    except ValueError as exc:
+        print(exc)
+        return current
+    key = missing_key(choice)
+    if key:
+        print(f"Set {key} to use {choice.provider}.")
+        return current
+    print(f"Now using {choice}.")
+    return choice
 
 
 def _print_turn(agent, question: str) -> None:
