@@ -33,6 +33,7 @@ from models import (
     parse_listing,
     provider_default,
 )
+from persona import apply_persona_command
 from trace import format_status
 
 logging.basicConfig(
@@ -130,7 +131,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/debug keeps those steps after the answer. "
         "/models lists the models I can run on, and /model or /provider picks one. "
         "/reset starts a fresh conversation. "
-        "Things I remember about you stay after a reset.",
+        "Things I remember about you stay after a reset. "
+        "/persona names me or sets how I talk. "
+        "/persona bland makes me a plain agent again.",
     )
 
 
@@ -138,7 +141,16 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_unwanted(update, context):
         return
     context.user_data["generation"] = context.user_data.get("generation", 0) + 1
-    await reply_text(update, "Started a new conversation. Saved memories stay.")
+    await reply_text(update, "Started a new conversation. Saved memories and your persona stay.")
+
+
+async def persona(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_unwanted(update, context):
+        return
+    await reply_text(
+        update,
+        apply_persona_command(str(update.effective_user.id), list(context.args or [])),
+    )
 
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -407,7 +419,11 @@ async def on_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_unwanted(update, context):
         return
-    await reply_text(update, "I don't know that command. Try /start, /reset, /debug, /models, /model, or /provider.")
+    await reply_text(
+        update,
+        "I don't know that command. "
+        "Try /start, /reset, /debug, /models, /model, /provider, or /persona.",
+    )
 
 
 def main() -> None:
@@ -429,6 +445,7 @@ def main() -> None:
     application.add_handler(CommandHandler("models", models_list, filters=PRIVATE))
     application.add_handler(CallbackQueryHandler(on_pick, pattern=r"^pick:"))
     application.add_handler(CommandHandler("provider", provider, filters=PRIVATE))
+    application.add_handler(CommandHandler("persona", persona, filters=PRIVATE))
     application.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(PRIVATE & filters.COMMAND, unknown_command))
     application.add_handler(MessageHandler(PRIVATE & ~filters.TEXT & ~filters.COMMAND, on_other))

@@ -43,7 +43,8 @@ def _user_id(runtime: ToolRuntime) -> str:
     return str(user_id).strip()
 
 
-def _db_path(user_id: str) -> Path:
+def database_path(user_id: str) -> Path:
+    """Path to this user's SQLite file. The file may not exist yet."""
     if not _USER_ID.fullmatch(user_id):
         raise ValueError(_BAD_USER)
     directory = memory_dir().resolve()
@@ -51,6 +52,10 @@ def _db_path(user_id: str) -> Path:
     if path.parent != directory:
         raise ValueError(_BAD_USER)
     return path
+
+
+def _db_path(user_id: str) -> Path:
+    return database_path(user_id)
 
 
 def _connect(user_id: str) -> sqlite3.Connection:

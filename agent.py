@@ -6,7 +6,9 @@ import sys
 import httpx
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.config import get_config
 
 from models import (
     PROVIDERS,
@@ -19,6 +21,7 @@ from models import (
     parse_choice,
     parse_listing,
 )
+from persona import persona_command_reply, persona_instructions
 from tools import load_tools
 from trace import events_from_update, format_trace
 
@@ -35,8 +38,34 @@ SYSTEM_PROMPT = (
     "For current events or facts you are unsure of, search the web, open the most "
     "promising results, and follow links deeper when a page doesn't answer the question. "
     "Mention the URLs you relied on. "
-    "Reply in plain text."
+    "Reply in plain text. "
+    "A name or manner from /persona is already in these instructions when one is set. "
+    "You cannot change it yourself. If they want to, tell them to send /persona."
 )
+
+
+def _configured_user_id() -> str:
+    try:
+        config = get_config()
+    except RuntimeError:
+        return ""
+    configurable = config.get("configurable") or {}
+    user_id = configurable.get("user_id")
+    if user_id is None:
+        return ""
+    return str(user_id).strip()
+
+
+def system_prompt_for(user_id: str, base: str = SYSTEM_PROMPT) -> str:
+    extra = persona_instructions(user_id)
+    if not extra:
+        return base
+    return f"{base} {extra}"
+
+
+@dynamic_prompt
+def persona_prompt(request: ModelRequest) -> str:
+    return system_prompt_for(_configured_user_id(), request.system_prompt or SYSTEM_PROMPT)
 
 
 def build_agent(choice: ModelChoice | None = None, checkpointer=None):
@@ -45,6 +74,7 @@ def build_agent(choice: ModelChoice | None = None, checkpointer=None):
         model=str(choice),
         tools=load_tools(),
         system_prompt=SYSTEM_PROMPT,
+        middleware=[persona_prompt],
         checkpointer=checkpointer or InMemorySaver(),
     )
 
@@ -133,7 +163,10 @@ def main() -> None:
         _print_turn(agents.get(choice), " ".join(sys.argv[1:]))
         return
 
-    print(f"Agent ready on {choice}. Ask a question, /models to list models, /model to switch, or quit.")
+    print(
+        f"Agent ready on {choice}. Ask a question, /models to list models, "
+        "/model to switch, /persona, or quit."
+    )
     while True:
         try:
             question = input("> ").strip()
@@ -187,6 +220,10 @@ def _switch_model(current: ModelChoice, args: str) -> ModelChoice:
 
 
 def _print_turn(agent, question: str) -> None:
+    reply = persona_command_reply("cli", question)
+    if reply is not None:
+        print(reply)
+        return
     trace, answer = run_turn(agent, question, thread_id="cli", user_id="cli")
     if trace:
         print(trace)
